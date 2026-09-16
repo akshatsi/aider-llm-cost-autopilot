@@ -127,11 +127,21 @@ Subclass or wrap `Coder` so that a turn:
 5. Runs `test_cmd` — pass? commit and finish. Fail? revert, escalate, retry
 6. Ladder exhausted? surface the last attempt with an explicit "could not validate" note
 
-**Also in this step — the protected-path guard.** Override `allowed_to_edit()` to hard-reject any path in our protected set (test files by default), returning `False` outright rather than falling through to the confirm prompt that promotes it to editable. This is the fix for what Step 1 found; without it the whole escalation mechanism can be gamed by the model it's meant to judge.
+**Status: done** — `aider/cost_autopilot/orchestrator.py`, `run_autopilot_task()`. A fresh `Coder` per attempt (not chained via `from_coder=` — each model gets an independent shot, no inherited failed-attempt context), `auto_commits=False` and `auto_test=False` on every one of them so Aider's own commit/retry behavior never fires; this module owns the test run and the commit/revert decision entirely, per the design above.
 
-Test for it explicitly: feed a response that tries to edit a protected test file, assert the edit is rejected and the file is byte-identical afterward. Regression-test this — it's the invariant everything else rests on.
+The protected-path guard is instance-level monkeypatching (`_apply_protected_path_guard`), not a subclass — it works regardless of which concrete `Coder` subclass `Coder.create()` picked for the edit format in use, by saving the real bound `allowed_to_edit` and replacing the instance attribute with a closure that checks the protected set first. 3 unit tests against a fake coder confirm: a protected path is rejected without ever reaching the real check; an unprotected path delegates through untouched; an empty protected set blocks nothing.
 
-Prefer wrapping over editing `base_coder.py` in place — a smaller diff against upstream is easier to keep in sync. The `allowed_to_edit()` override is the one place a subclass is clearly the right tool.
+**Two things found by actually running this against the live testbed that no amount of reading code would have caught:**
+
+1. **`llama3.2:1b` doesn't just fail — it hallucinates files.** Forced to start there (the router itself picks `qwen2.5:7b` for this task, so the failure path needed forcing to actually exercise it), it invented `path/to/filename.js` and a bogus `gitignore` file (not `.gitignore` — a new, separate file) and wrote them to disk. Both fully unrelated to the task.
+
+2. **The original `_revert()` didn't clean them up — a real bug, not a hypothetical.** `git checkout -- <files>` only restores files git already knows about; these were untracked, so checkout silently no-opped and they leaked onto disk. Confirmed by inspection after the first live run: `gitignore` and `path/` were still sitting in the testbed after "revert."
+
+   Fixed: `_revert()` now classifies each edited path — tracked (`git ls-files --error-unmatch` succeeds) gets `git checkout --`'d back to its committed state; untracked gets deleted outright, along with any now-empty parent directories it created. Re-ran the identical forced-escalation scenario after the fix: same result (`llama3.2:1b` fails → `qwen2.5:7b` succeeds → commits), but this time `git status` is clean and no stray files remain. 5 more unit tests lock this in against a real scratch git repo (tracked-file revert, untracked-file deletion, empty-dir cleanup, a mix of both in one call, and the no-op case) — not fakes, since the tracked/untracked distinction is exactly the kind of thing a mock would paper over.
+
+Live-verified end to end, twice: once on the happy path (router picks `qwen2.5:7b` directly, succeeds first try, commits, `4 passed` in the testbed), once on the forced-escalation path (`llama3.2:1b` fails and is fully cleaned up → `qwen2.5:7b` succeeds → commits). 25 tests total across the package, all passing.
+
+Prefer wrapping over editing `base_coder.py` in place — a smaller diff against upstream is easier to keep in sync. The instance-level `allowed_to_edit` patch turned out to be the right call over a subclass: no need to know or care which concrete `Coder` subclass got constructed.
 
 ### Step 5 — Reporting
 After each turn, print the trace inline: which model ran, whether it escalated, time taken, and dollar cost where LiteLLM knows the price (`$0` for local models is real, not a placeholder). No dashboard — terminal-native, consistent with living inside a terminal tool.
