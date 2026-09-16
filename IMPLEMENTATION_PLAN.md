@@ -112,11 +112,11 @@ Both trivial, one-liner tasks. No principled reason one should route to the bigg
 Doesn't block moving forward — it's exactly why escalation exists. But Step 6 should specifically check the *rate* of decisions like this, not just "does the happy path work."
 
 ### Step 3 — Escalation module (`aider/cost_autopilot/escalation.py`)
-The ladder-walking logic, independent of Aider: given a starting position, a way to attempt, and a way to validate, return the first attempt that validates or exhaust the ladder.
+Done — `aider/cost_autopilot/escalation.py`, `run_with_escalation()`. Takes a start *model* (not an index — matches what `pick_starting_model()` returns directly, no translation needed in the caller), walks up the ladder one position at a time on validation failure, stops at the first pass or after `max_attempts` (default 3) models tried, whichever comes first. 10 unit tests, fakes throughout, 0.02s.
 
-Pure and injectable — no Aider imports, no network. Unit tested with fakes, same approach that worked on the previous build.
+One deliberate departure from the original backend worth noting: this is a plain `for` loop, not LangGraph. LangGraph made sense there because escalation was one node among several in a larger orchestration graph; here it's the only control flow this module owns, so a loop is simpler and adds zero dependencies.
 
-Config: `max_attempts` (default 3) caps the walk so one stubborn task can't burn the entire ladder.
+Composition-checked against the real router (not just fakes): `pick_starting_model()`'s real output feeds directly into `run_with_escalation()`, a failing first attempt correctly escalates to the next ladder position, succeeds there. The two modules fit together as designed.
 
 ### Step 4 — Wire into the Coder
 Subclass or wrap `Coder` so that a turn:
