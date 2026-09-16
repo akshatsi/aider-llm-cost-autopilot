@@ -143,8 +143,28 @@ Live-verified end to end, twice: once on the happy path (router picks `qwen2.5:7
 
 Prefer wrapping over editing `base_coder.py` in place — a smaller diff against upstream is easier to keep in sync. The instance-level `allowed_to_edit` patch turned out to be the right call over a subclass: no need to know or care which concrete `Coder` subclass got constructed.
 
-### Step 5 — Reporting
-After each turn, print the trace inline: which model ran, whether it escalated, time taken, and dollar cost where LiteLLM knows the price (`$0` for local models is real, not a placeholder). No dashboard — terminal-native, consistent with living inside a terminal tool.
+### Step 5 — Reporting — done
+
+`aider/cost_autopilot/reporting.py`, `format_trace()` + `print_trace()`. Prints inline after every turn via the same `io.tool_output()` Aider itself uses for status messages — no dashboard, no second place to look.
+
+Cost comes for free, not from anything we built: Aider's own `calculate_and_show_tokens_and_cost()` already skips cost computation entirely when LiteLLM has no known price for a model (`if not self.main_model.info.get("input_cost_per_token"): return`) — true for every local Ollama model. So `coder.total_cost` reads a genuine `0` for local models, not a placeholder standing in for "unknown." Read directly off a fresh per-attempt `Coder` instance in `orchestrator.py`'s `attempt_fn`, alongside wall-clock latency measured around `run_one()`.
+
+One deliberate wording choice: zero cost renders as `$0 (unpriced/local)`, not a bare `$0.000000`. A literal dollar amount of zero reads as "somehow got free API access"; this says why it's zero instead. Locked in with a test specifically asserting the bare form never appears.
+
+`format_trace()` depends only on `escalation.py`'s generic `EscalationOutcome` type, not on `orchestrator.py` — kept the dependency one-directional (orchestrator → reporting → escalation) to avoid a circular import, since orchestrator needs to call `print_trace()` at the end of a run.
+
+6 unit tests against fake attempt data (single success, escalation, exhausted ladder, the unpriced-wording assertion, a real-cost case for when the ladder eventually holds a priced model, and that total time sums across every attempt, not just the last one).
+
+Live-verified against the same forced-escalation scenario as Step 4, output exactly as designed:
+
+```
+cost_autopilot:
+  1. ollama/llama3.2:1b           ✗    31.8s  $0 (unpriced/local)
+  2. ollama/qwen2.5:7b            ✓    10.9s  $0 (unpriced/local)
+  -> escalated to ollama/qwen2.5:7b (committed), total 42.7s, $0 (unpriced/local)
+```
+
+31 tests total across the package, all passing.
 
 ### Step 6 — End-to-end testing
 Reuse the 16-task sample library from the previous build (`tests/fixtures/sample_tasks/` in the `Cheap_Worth` repo) — already validated, already proven against Ollama. Then one real-project scenario: a scratch git repo with an actual test suite, exercising real-repo-mode validation, which no test has covered yet.

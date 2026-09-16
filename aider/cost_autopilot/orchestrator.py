@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,7 @@ from aider.cost_autopilot.escalation import (
     ValidationResult,
     run_with_escalation,
 )
+from aider.cost_autopilot.reporting import print_trace
 from aider.cost_autopilot.router import pick_starting_model
 
 
@@ -73,6 +75,8 @@ class AttemptOutcome:
 
     coder: Any
     edited_files: set
+    latency_ms: float = 0.0
+    cost_usd: float = 0.0
 
     @property
     def wrote_anything(self) -> bool:
@@ -167,8 +171,21 @@ def run_autopilot_task(
 
     def attempt_fn(model: str) -> AttemptOutcome:
         coder = _make_coder(model, io, fnames, protected_paths)
+        start = time.monotonic()
         coder.run_one(user_message, preproc=True)
-        return AttemptOutcome(coder=coder, edited_files=set(coder.aider_edited_files))
+        latency_ms = (time.monotonic() - start) * 1000
+        # total_cost stays 0 when LiteLLM has no known price for `model`
+        # (true for every local Ollama model) — Aider's own
+        # calculate_and_show_tokens_and_cost() skips cost math entirely
+        # in that case, so this is genuinely unknown/free, not a
+        # placeholder. Populated for real when the ladder holds a priced
+        # model. Same hybrid principle as the original Python backend.
+        return AttemptOutcome(
+            coder=coder,
+            edited_files=set(coder.aider_edited_files),
+            latency_ms=latency_ms,
+            cost_usd=coder.total_cost,
+        )
 
     def validate_fn(attempt: AttemptOutcome) -> ValidationResult:
         if not attempt.wrote_anything:
@@ -193,5 +210,7 @@ def run_autopilot_task(
         coder.auto_commits = True
         coder.auto_commit(final.result.edited_files, context=f"cost_autopilot: {final.model}")
         committed = True
+
+    print_trace(outcome, committed, io)
 
     return AutopilotResult(outcome=outcome, committed=committed)
