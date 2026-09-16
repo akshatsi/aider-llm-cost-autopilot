@@ -48,3 +48,10 @@ importlib-metadata<8.0.0
 # mcp which is a pywin32 dependency that fails on linux CI.
 fastapi
 orjson
+
+# cost_autopilot: RouteLLM's pretrained bert router picks the starting
+# model. Deliberately not routellm[serve,eval] — those extras pull in
+# GPU-serving dependencies (flashinfer, apache-tvm-ffi) we don't need;
+# we only use the Controller class for routing decisions, not RouteLLM's
+# own model-serving stack.
+routellm

@@ -98,9 +98,18 @@ Wrap RouteLLM's `Controller` behind one function: `pick_starting_model(prompt, l
 - RouteLLM's import chain constructs an `OpenAI()` client at module load even for `bert`. Needs a placeholder `OPENAI_API_KEY` env var set — never used for a real call, just satisfies the constructor.
 - RouteLLM returns a binary weak/strong decision. Map that onto ladder positions.
 
-Done when: unit tests confirm easy prompts route low and hard prompts route high, with no network calls.
+Done — `aider/cost_autopilot/router.py`, `pick_starting_model()`. `route_fn` is injectable (mirrors `execute_fn`/`classify_fn` in the original backend): 7 unit tests run against a fake, 0.02s, no network, no torch. Locks in the real invariant too — `ladder[2]` and beyond are never passed to the router at all, confirmed by asserting on the fake's captured call args, not just the ladder's declared shape.
 
-**Known caveat to watch, not solve yet:** the pretrained router was calibrated on cloud-model preference data (GPT-4-class pairs), not small local models. Its decisions were directionally sensible in manual testing, but its confidence scores shouldn't be assumed well-calibrated for this ladder. Escalation is what makes this safe to ship despite that.
+**Caveat, no longer hypothetical — reproduced directly against the real checkpoint:**
+
+```
+"Write a function that reverses a string"   → weak model  (llama3.2:1b)
+"Write a function that adds two integers"   → strong model (qwen2.5:7b)
+```
+
+Both trivial, one-liner tasks. No principled reason one should route to the bigger model and the other shouldn't — this is the calibration mismatch from cloud-trained preference data applied to a ladder it's never seen, now with a concrete repro instead of an abstract warning. The code is verified correct (same prompt through `pick_starting_model()` and through a raw `Controller` call agree, deterministic across repeated runs) — this is the router's actual judgment, not a bug in the wiring around it.
+
+Doesn't block moving forward — it's exactly why escalation exists. But Step 6 should specifically check the *rate* of decisions like this, not just "does the happy path work."
 
 ### Step 3 — Escalation module (`aider/cost_autopilot/escalation.py`)
 The ladder-walking logic, independent of Aider: given a starting position, a way to attempt, and a way to validate, return the first attempt that validates or exhaust the ladder.
