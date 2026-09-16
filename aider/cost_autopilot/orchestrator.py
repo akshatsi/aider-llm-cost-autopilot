@@ -63,10 +63,31 @@ def _make_coder(model: str, io, fnames: list[str], protected_paths: set[str]):
     return coder
 
 
+# Aider's own default is a 600s timeout with litellm retrying a timed-out
+# call several times at rising backoff -- fine for a paid API, but on a
+# local Ollama backend a single stuck or degenerating generation can then
+# eat tens of minutes. The Step 6 batch run hit this for real: one task's
+# weak-tier attempt rambled to 102k output tokens and hallucinated a file,
+# and two ladder attempts together burned over 80 minutes before this fix,
+# because each one ran the full 600s before litellm's own retries kicked
+# in. These bounds make a stuck/degenerate attempt fail fast instead --
+# our own escalation loop, not litellm's retry logic, decides what to try
+# next.
+LOCAL_MODEL_TIMEOUT_S = 120
+LOCAL_MODEL_MAX_TOKENS = 4096
+
+
 def _model_for(model_name: str):
     from aider.models import Model
 
-    return Model(model_name)
+    model = Model(model_name)
+    if model.is_ollama():
+        extra = dict(model.extra_params or {})
+        extra.setdefault("timeout", LOCAL_MODEL_TIMEOUT_S)
+        extra.setdefault("num_retries", 0)
+        extra.setdefault("max_tokens", LOCAL_MODEL_MAX_TOKENS)
+        model.extra_params = extra
+    return model
 
 
 @dataclass

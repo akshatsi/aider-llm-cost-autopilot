@@ -10,7 +10,13 @@ import subprocess
 
 import pytest
 
-from aider.cost_autopilot.orchestrator import _apply_protected_path_guard, _revert
+from aider.cost_autopilot.orchestrator import (
+    LOCAL_MODEL_MAX_TOKENS,
+    LOCAL_MODEL_TIMEOUT_S,
+    _apply_protected_path_guard,
+    _model_for,
+    _revert,
+)
 
 
 class FakeIO:
@@ -131,3 +137,23 @@ def test_revert_handles_a_mix_of_tracked_and_hallucinated_files_together(scratch
 
 def test_revert_with_no_edited_files_is_a_safe_no_op(scratch_repo):
     _revert(set(), cwd=str(scratch_repo))  # must not raise
+
+
+# --- _model_for: bounded timeout/tokens for local Ollama models --------
+
+
+def test_ollama_model_gets_bounded_timeout_and_retries_and_max_tokens():
+    """Real finding from the Step 6 batch run: with Aider's 600s default
+    and litellm's own retries on top, one stuck local generation burned
+    over 80 minutes. These bounds make it fail fast instead."""
+    model = _model_for("ollama/llama3.2:1b")
+
+    assert model.extra_params["timeout"] == LOCAL_MODEL_TIMEOUT_S
+    assert model.extra_params["num_retries"] == 0
+    assert model.extra_params["max_tokens"] == LOCAL_MODEL_MAX_TOKENS
+
+
+def test_non_ollama_model_is_left_alone():
+    model = _model_for("gpt-4o-mini")
+
+    assert not model.extra_params or "timeout" not in model.extra_params

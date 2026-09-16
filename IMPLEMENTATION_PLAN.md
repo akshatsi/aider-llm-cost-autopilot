@@ -76,6 +76,8 @@ Escalation walks up this list. The list is configuration — swap in any LiteLLM
 
 Open question for Step 6: whether position 0 earns its place in an Aider ladder at all, or whether a 1B model is simply below the floor for in-repo editing and the ladder should start at 7B. Don't resolve this by argument — measure escalation rate from position 0 across the sample library.
 
+**Answered by Step 6, with numbers:** no. Across 16 tasks, the router picked position 0 twice and lost both times — a 0% success rate, not a low one. See Step 6 below.
+
 ## Steps
 
 ### Step 1 — Baseline: Aider unmodified, against Ollama — ✅ DONE
@@ -166,10 +168,42 @@ cost_autopilot:
 
 31 tests total across the package, all passing.
 
-### Step 6 — End-to-end testing
+### Step 6 — End-to-end testing — ✅ DONE
+
 Reuse the 16-task sample library from the previous build (`tests/fixtures/sample_tasks/` in the `Cheap_Worth` repo) — already validated, already proven against Ollama. Then one real-project scenario: a scratch git repo with an actual test suite, exercising real-repo-mode validation, which no test has covered yet.
 
-Watch for: does routing actually vary across tasks, does escalation fire when it should, is git history clean after failures, do the reported numbers match reality.
+**Project-based test, run first.** Built `~/Desktop/autopilot-project-test`: a `TaskManager` class with existing `add_task`/`remove_task` methods already in place, plus tests for two methods that don't exist yet (`mark_complete`, `pending_tasks`). This is the harder, more realistic case the sample library doesn't cover — the model has to extend a class with live state, not write an isolated function from nothing. The router picked `qwen2.5:7b` directly, wrote both methods correctly on the first attempt, preserved the existing methods untouched, all 4 tests passed, one clean commit. No escalation needed.
+
+**16-task batch run.** All 16 tasks pass. Along the way, this step found and fixed a real problem worth its own write-up.
+
+**A stuck local model can hang for the better part of an hour, and nothing in Aider stops it.** The first full run was still going after three hours and had to be killed by hand. Only 14 of 16 tasks had finished. Reading the log showed why: two tasks each spent tens of minutes on a single model call.
+
+- `reverse_string`: the router opened with `llama3.2:1b`. It answered with a single 102,000-token wall of repeated garbage and, in the middle of it, invented a file (`path/to/filename.js`) — the same hallucination pattern found back in Step 4, just far slower this time. That one call ran for 56 minutes.
+- `binary_search`: `llama3.2:1b` again failed, taking 42 minutes to do it; the escalation to `qwen2.5:7b` that then succeeded took another 40 minutes on top.
+
+Neither Aider nor LiteLLM caps how long a call may run or how much it may generate. Aider's default timeout is 600 seconds, and LiteLLM retries a timed-out call several times more at rising backoff — fine against a paid API that answers in a couple of seconds, ruinous against a local model that has started rambling. The two waits above stack almost exactly onto multiples of 600 seconds, confirming that's what happened.
+
+Fixed in `_model_for()` (`aider/cost_autopilot/orchestrator.py`): every `ollama/` model now carries `timeout=120`, `num_retries=0`, and `max_tokens=4096` in its `extra_params`, which LiteLLM reads directly. A stuck or rambling call now fails in two minutes instead of the best part of an hour, LiteLLM stops retrying so our own escalation loop is the only thing deciding what happens next, and a hard cap on output length bounds the worst case regardless. Non-Ollama models are untouched — this only applies where a local server can hang indefinitely; a paid API failing that slowly would already be worth investigating on its own.
+
+Re-ran the two tasks the killed batch never reached with the fix in place: both finished in under 35 seconds, first attempt, no retries. Two unit tests lock the bounds in (`test_ollama_model_gets_bounded_timeout_and_retries_and_max_tokens`, `test_non_ollama_model_is_left_alone`) — 33 tests total across the package now.
+
+**Final numbers, all 16 tasks passing:**
+
+| | |
+|---|---|
+| Success rate | 16/16 |
+| Router picked `qwen2.5:7b` directly | 14/16 — succeeded first try, every time |
+| Router picked `llama3.2:1b` | 2/16 (`reverse_string`, `binary_search`) — failed both times, escalated to `qwen2.5:7b`, which then succeeded both times |
+| `qwen2.5:14b` (position 2) needed | 0/16 — never reached; `qwen2.5:7b` was enough whenever tried |
+| Git history after the run | 17 commits (1 baseline + 1 per task), `git status` clean, no stray files from the two failed position-0 attempts |
+
+Answers Step 6's own checklist:
+- **Does routing vary across tasks?** Yes — not randomly, but not usefully either. Every task the router sent to `qwen2.5:7b` succeeded; every task it sent to `llama3.2:1b` failed. Position 0 never once produced a passing result on its own across this library.
+- **Does escalation fire when it should?** Yes, both times it was needed, and not once when it wasn't.
+- **Is git history clean after failures?** Yes — confirms the tracked/untracked revert fix from Step 4 holds up across a full batch, not just the one forced case it was built against.
+- **Do the reported numbers match reality?** Yes, with one caveat: cost reads `$0 (unpriced/local)` throughout, correctly, since every model here is local.
+
+The open question from the Model ladder section above is now answered with data, not argument: at position 0, `llama3.2:1b` lost 2 out of 2 times it was tried. A ladder that starts at `qwen2.5:7b` would have produced the identical 16/16 result with zero escalations and none of the position-0 wall-clock cost — the 1B model earned its place in the *Cheap_Worth* benchmark (standalone functions, no existing file to edit against) but not here.
 
 ## Cost
 
