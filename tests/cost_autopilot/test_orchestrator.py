@@ -14,6 +14,7 @@ from aider.cost_autopilot.orchestrator import (
     LOCAL_MODEL_MAX_TOKENS,
     LOCAL_MODEL_TIMEOUT_S,
     _apply_protected_path_guard,
+    _disable_reflections,
     _model_for,
     _revert,
 )
@@ -157,3 +158,21 @@ def test_non_ollama_model_is_left_alone():
     model = _model_for("gpt-4o-mini")
 
     assert not model.extra_params or "timeout" not in model.extra_params
+
+
+# --- _disable_reflections: no same-model retry storms -------------------
+
+
+def test_disable_reflections_zeroes_out_aiders_own_retry_loop():
+    """Real finding from re-running the Step 6 batch: even with the
+    per-call timeout/max_tokens bounds, Aider's own reflection loop
+    (default max_reflections=3) re-prompted a stuck model up to 4 times
+    per attempt, each a fresh max-token generation of the same
+    degenerate output. This is what actually made one attempt take
+    several minutes instead of one call's worth of time."""
+    coder = FakeCoder()
+    coder.max_reflections = 3  # Aider's real class default
+
+    _disable_reflections(coder)
+
+    assert coder.max_reflections == 0

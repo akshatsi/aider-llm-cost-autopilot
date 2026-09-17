@@ -183,17 +183,24 @@ Reuse the 16-task sample library from the previous build (`tests/fixtures/sample
 
 Neither Aider nor LiteLLM caps how long a call may run or how much it may generate. Aider's default timeout is 600 seconds, and LiteLLM retries a timed-out call several times more at rising backoff — fine against a paid API that answers in a couple of seconds, ruinous against a local model that has started rambling. The two waits above stack almost exactly onto multiples of 600 seconds, confirming that's what happened.
 
-Fixed in `_model_for()` (`aider/cost_autopilot/orchestrator.py`): every `ollama/` model now carries `timeout=120`, `num_retries=0`, and `max_tokens=4096` in its `extra_params`, which LiteLLM reads directly. A stuck or rambling call now fails in two minutes instead of the best part of an hour, LiteLLM stops retrying so our own escalation loop is the only thing deciding what happens next, and a hard cap on output length bounds the worst case regardless. Non-Ollama models are untouched — this only applies where a local server can hang indefinitely; a paid API failing that slowly would already be worth investigating on its own.
+First fix, in `_model_for()` (`aider/cost_autopilot/orchestrator.py`): every `ollama/` model now carries `timeout=120`, `num_retries=0`, and `max_tokens=4096` in its `extra_params`, which LiteLLM reads directly. Checked in isolation, this worked — a direct LiteLLM call against the same model stopped at the token cap, not at 102,000 tokens.
 
-Re-ran the two tasks the killed batch never reached with the fix in place: both finished in under 35 seconds, first attempt, no retries. Two unit tests lock the bounds in (`test_ollama_model_gets_bounded_timeout_and_retries_and_max_tokens`, `test_non_ollama_model_is_left_alone`) — 33 tests total across the package now.
+**That fix was necessary but not enough, and a second full re-run proved it.** Asked to confirm timings end to end, the batch was re-run from a clean baseline — and hung again, stuck on `reverse_string` for over six minutes on what should have been a two-minute-capped call. The per-call bound was working (each generation now genuinely stopped near 4,096 tokens, confirmed by Aider's own `Tokens: ... received` line), but Aider has its **own** internal retry loop on top of it: `max_reflections` (`base_coder.py`, default 3) re-prompts the *same* model with error feedback when its output doesn't parse as a valid edit. A model stuck producing the same unparseable, repeating output fails the same way on every reflection, so one attempt was quietly running the full 4,096-token generation up to four times over — the exact same-model retry this project's escalation exists to replace with a *different* model, just never actually turned off.
 
-**Final numbers, all 16 tasks passing:**
+Second fix, same file: `_disable_reflections()` sets `coder.max_reflections = 0` on every constructed `Coder`. A malformed response now returns immediately instead of being re-argued with the model that just produced it — our own escalation loop decides what runs next, not Aider's. Confirmed directly against `reverse_string` in isolation: the failing attempt now finishes in 65.8s, total wall time 79.1s, down from six-plus minutes and climbing.
+
+Two unit tests lock in the first bound (`test_ollama_model_gets_bounded_timeout_and_retries_and_max_tokens`, `test_non_ollama_model_is_left_alone`), one locks in the second (`test_disable_reflections_zeroes_out_aiders_own_retry_loop`) — 34 tests total across the package now.
+
+**Confirmed end to end: a full, clean-baseline re-run of all 16 tasks, both fixes in place, no shortcuts.**
 
 | | |
 |---|---|
 | Success rate | 16/16 |
-| Router picked `qwen2.5:7b` directly | 14/16 — succeeded first try, every time |
-| Router picked `llama3.2:1b` | 2/16 (`reverse_string`, `binary_search`) — failed both times, escalated to `qwen2.5:7b`, which then succeeded both times |
+| Total wall time | 781.0s (13.0 min) |
+| Router picked `qwen2.5:7b` directly | 14/16 — succeeded first try, every time, 27–54s each |
+| Router picked `llama3.2:1b` | 2/16 (`reverse_string`, `binary_search`, same two tasks as the first run — routing is deterministic) — failed both times, escalated to `qwen2.5:7b`, which then succeeded both times |
+| `reverse_string` total | 127.9s — was 3,335.3s (55.6 min) before the fixes |
+| `binary_search` total | 139.1s — was 4,967.1s (82.8 min) before the fixes |
 | `qwen2.5:14b` (position 2) needed | 0/16 — never reached; `qwen2.5:7b` was enough whenever tried |
 | Git history after the run | 17 commits (1 baseline + 1 per task), `git status` clean, no stray files from the two failed position-0 attempts |
 
@@ -204,6 +211,8 @@ Answers Step 6's own checklist:
 - **Do the reported numbers match reality?** Yes, with one caveat: cost reads `$0 (unpriced/local)` throughout, correctly, since every model here is local.
 
 The open question from the Model ladder section above is now answered with data, not argument: at position 0, `llama3.2:1b` lost 2 out of 2 times it was tried. A ladder that starts at `qwen2.5:7b` would have produced the identical 16/16 result with zero escalations and none of the position-0 wall-clock cost — the 1B model earned its place in the *Cheap_Worth* benchmark (standalone functions, no existing file to edit against) but not here.
+
+**The broader lesson, worth stating plainly:** a fix checked only in isolation, against a call built to look like the failure case, is not the same as a fix confirmed against the real failure end to end. The first fix passed its own test and still left the real bug standing, because the real bug lived one layer up, in Aider's own retry logic, not in the LiteLLM call the test exercised. Re-running the whole batch rather than trusting the isolated check is what caught it.
 
 ## Cost
 

@@ -50,6 +50,21 @@ def _apply_protected_path_guard(coder, protected_paths: set[str]) -> None:
     coder.allowed_to_edit = guarded
 
 
+def _disable_reflections(coder) -> None:
+    """Aider's own reflection loop (base_coder.py's max_reflections,
+    default 3) re-prompts the *same* model with error feedback when an
+    edit doesn't parse. That's exactly the same-model retry this
+    project's escalation was built to replace with a stronger model
+    instead (see IMPLEMENTATION_PLAN.md's "What's missing is narrow").
+    Left enabled it also multiplies wall time for nothing: a local model
+    stuck in a degenerate loop produces the same unparseable output on
+    every reflection, so up to 4 sequential max-token generations run
+    per attempt instead of 1. Disabling it means attempt_fn always
+    returns after a single model call -- our own escalation loop, not
+    Aider's internal one, decides what runs next."""
+    coder.max_reflections = 0
+
+
 def _make_coder(model: str, io, fnames: list[str], protected_paths: set[str]):
     coder = Coder.create(
         main_model=_model_for(model),
@@ -60,6 +75,7 @@ def _make_coder(model: str, io, fnames: list[str], protected_paths: set[str]):
         suggest_shell_commands=False,
     )
     _apply_protected_path_guard(coder, protected_paths)
+    _disable_reflections(coder)
     return coder
 
 
