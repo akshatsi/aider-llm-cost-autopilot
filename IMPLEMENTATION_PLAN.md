@@ -254,6 +254,18 @@ Live-verified against the identical simulated failure: total time dropped from r
 
 5 new tests — the specific case is fast-failed, a different Ollama error still retries normally, a non-Ollama connection error is unaffected, the patch installs at most once, and `_model_for()` actually installs it. 54 tests total across the package now.
 
+**Follow-up: does AUTO work with paid models like Claude, not just Ollama? Yes — and checking it surfaced a claim worth correcting.** `--auto-ladder` was already provider-agnostic by design, so a Claude-only ladder works as-is:
+
+```bash
+aider --model auto --auto-ladder "claude-haiku-4-5,claude-sonnet-5,claude-opus-5"
+```
+
+Checking Aider's actual model resolution for this ladder turned up something that looked like a real bug at first: `claude-haiku-4-5` resolves to `edit_format: diff`, while `claude-sonnet-5` and `claude-opus-5` both resolve to `whole` — three models in one ladder, two different native formats. Since AUTO swaps `main_model` per turn (the spinner fix above) without rebuilding the Coder, that looked like every turn routed to Sonnet or Opus would run through a Coder built for `diff`, mismatched against what those models were tuned for.
+
+**Traced fully before touching any code, and the alarm doesn't hold up.** `main_model.edit_format` is read at exactly two places at runtime (`base_coder.py`): a diagnostic hint suggesting a stronger model when output is truncated, and a display string for `/model`'s announcement. Neither one touches how an edit actually gets parsed. What actually determines parsing is the Coder *subclass* (`EditBlockCoder` for `diff`, `WholeFileCoder` for `whole`) — chosen exactly once, at session start, from `ladder[0]`, and never reselected afterward no matter which model answers a given turn. So every turn, regardless of router choice, gets asked for edits in the one format decided at startup, and gets parsed against that same format consistently. Nothing is actually mismatched at runtime — the two-line "fix" first proposed (forcing every routed model's `.edit_format` attribute to agree) would only have changed those two cosmetic strings, not any real behavior.
+
+What's left is smaller than originally claimed: a model whose own tuned default differs from the ladder's fixed format is being asked to work slightly outside its best-tuned configuration — a quality question, not a correctness one, and the same situation as any Aider user manually overriding `--edit-format` against a model's default, which is normal and already supported. Actually letting every model run in its own native format would mean rebuilding the Coder mid-session on every turn, which cuts directly against the "one ongoing session" design decision this whole feature is built on. Decided to leave it as-is rather than build that against a speculative benefit — revisit only if real use against a mixed-format ladder shows it actually costs success rate, not before.
+
 ## Cost
 
 Zero. Ollama for generation, the `bert` router runs locally on CPU via PyTorch, and no step requires a funded API key. The placeholder `OPENAI_API_KEY` is never used for a request.
