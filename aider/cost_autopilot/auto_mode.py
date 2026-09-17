@@ -44,17 +44,34 @@ def enable_auto_routing(
     route_fn: Callable[[str, list[str]], str] | None = None,
     model_factory: Callable[[str], object] | None = None,
 ) -> None:
-    """Instance-level wrap of coder.send, not coder.send_message --
-    send already has a model=None -> self.main_model fallback built
-    in, so this only needs to intervene in that fallback rather than
-    duplicate any of send_message's message-formatting/cost/spinner
-    logic.
+    """Instance-level wrap of coder.run_one -- the one place that
+    receives the genuine top-level user_message directly, once per
+    real turn, before Aider does anything else with it.
 
-    Reads the just-appended user turn straight off coder.cur_messages
-    rather than re-parsing the fully formatted message list handed to
-    send(), since that's the literal, unmodified prompt text the user
-    typed -- exactly what "calls the right model with the prompt"
-    means.
+    This used to wrap coder.send instead (which also has a model=None
+    -> self.main_model fallback, a seam Step 4 had already found). That
+    was wrong in two ways a wrap this early fixes:
+
+    1. send_message() builds its "Waiting for {model}" spinner from
+       self.main_model *before* send() ever runs, so a wrap at send()
+       always showed the stale placeholder model, never the one
+       actually routed to. Setting main_model here, before run_one
+       hands off to send_message, means the spinner (and cost/token
+       accounting, which also reads main_model) reflect the real
+       choice.
+    2. send() gets called again for every reflection Aider runs on
+       its own output (a parse/lint/test error fed back for the same
+       model to retry) -- wrapping there meant re-routing reflection
+       *error text* through a classifier trained on natural-language
+       coding prompts, breaking the "same model gets a chance to fix
+       its own mistake" assumption reflection depends on. run_one's
+       user_message argument is untouched by its internal reflection
+       loop, so routing here happens exactly once per real message.
+
+    Skips routing entirely for a slash command or an empty message --
+    neither is a prompt for the classifier, and send_message() (where
+    the old wrap lived) was never reached for either case anyway, so
+    this preserves that.
 
     route_fn and model_factory are injectable for the same reason
     route_fn is injectable on pick_starting_model itself: tests supply
@@ -64,17 +81,17 @@ def enable_auto_routing(
     picker = route_fn or pick_starting_model
     build_model = model_factory or _model_for
     model_cache = {}
-    original_send = coder.send
+    original_run_one = coder.run_one
 
-    def routed_send(messages, model=None, functions=None):
-        if model is None:
-            prompt = coder.cur_messages[-1]["content"] if coder.cur_messages else ""
-            picked_name = picker(prompt, resolved_ladder)
+    def routed_run_one(user_message, preproc):
+        is_slash_command = preproc and coder.commands.is_command(user_message)
+        if user_message and not is_slash_command:
+            picked_name = picker(user_message, resolved_ladder)
             if picked_name not in model_cache:
                 model_cache[picked_name] = build_model(picked_name)
-            model = model_cache[picked_name]
+            coder.main_model = model_cache[picked_name]
             coder.io.tool_output(f"cost_autopilot: auto-routed to {picked_name}")
-        return original_send(messages, model=model, functions=functions)
+        return original_run_one(user_message, preproc)
 
-    coder.send = routed_send
+    coder.run_one = routed_run_one
     coder.cost_autopilot_auto_ladder = resolved_ladder

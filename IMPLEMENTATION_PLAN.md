@@ -236,7 +236,13 @@ Fixing this in place surfaced one real circular import: `orchestrator.py`'s top-
 
 Live-verified: a single-model `--auto-ladder` forces that exact model with no router call needed (matches `pick_starting_model()`'s existing single-model shortcut), and `/model auto ollama/qwen2.5:14b` mid-session correctly swapped the active ladder and the very next message routed within it.
 
-47 tests total across the package now.
+**Follow-up: the spinner lied about which model was running, and fixing it exposed a second, real bug.** Watching a real task run showed Aider's own "Waiting for {model}" spinner naming the ladder's placeholder model, never the one actually routed to — asked for by name, and worth taking seriously rather than dismissing as cosmetic, because the same root cause was a second, more real problem: `send()` runs again for every reflection Aider makes on its own output (a parse/lint/test error fed back for the same model to retry), and the old wrap re-routed each of those through the classifier too — feeding it Aider's own error-feedback text, not a natural-language coding prompt, breaking the assumption reflection depends on (the *same* model gets a chance to fix its own mistake).
+
+Both traced to the same design mistake: wrapping `coder.send`, which runs once per real message *and* once per reflection, and runs after `send_message()` already built the spinner from `self.main_model`. Moved the wrap up to `coder.run_one(user_message, preproc)` instead — the one place that receives the genuine top-level message directly, exactly once per real turn, before anything else touches it. `main_model` is set there, before handing off to the original `run_one`, so the spinner (and cost/token accounting, which also reads `main_model`) now see the real choice, and reflections run entirely inside the original `run_one`'s own loop, never re-entering the wrapper. A slash command or an empty message still bypasses routing entirely, matching `run_one`'s own real semantics (command detection only applies when `preproc=True`).
+
+Live-verified in a real terminal, not piped output — piping suppresses Aider's spinner entirely, so the original bug and the fix both had to be checked where the spinner actually renders: `cost_autopilot: auto-routed to ollama/qwen2.5:7b` now prints before anything else, no stale placeholder model name anywhere in the transcript.
+
+9 tests rewritten against the new hook, one new (a reflection can't be re-routed because `run_one` is only ever called once per real turn). 49 tests total across the package now.
 
 ## Cost
 

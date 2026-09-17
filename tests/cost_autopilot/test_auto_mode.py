@@ -22,20 +22,33 @@ class FakeIO:
         self.output.append(msg)
 
 
+class FakeCommands:
+    """Stand-in for Coder.commands -- only is_command matters here."""
+
+    def __init__(self, command_prefixes=("/",)):
+        self.command_prefixes = command_prefixes
+
+    def is_command(self, inp):
+        return bool(inp) and inp.startswith(self.command_prefixes)
+
+
 class FakeCoder:
     """Minimal stand-in for a real Coder -- just enough surface for
-    enable_auto_routing to wrap: .send, .cur_messages, .io."""
+    enable_auto_routing to wrap: .run_one, .commands, .io, .main_model."""
 
     def __init__(self):
         self.io = FakeIO()
-        self.cur_messages = []
-        self.send_calls = []
+        self.commands = FakeCommands()
+        self.main_model = "placeholder-model"
+        self.run_one_calls = []
 
-        def send(messages, model=None, functions=None):
-            self.send_calls.append({"messages": messages, "model": model, "functions": functions})
-            return "original send result"
+        def run_one(user_message, preproc):
+            self.run_one_calls.append(
+                {"user_message": user_message, "preproc": preproc, "main_model": self.main_model}
+            )
+            return "original run_one result"
 
-        self.send = send
+        self.run_one = run_one
 
 
 def test_is_auto_model_name_matches_case_and_whitespace_insensitively():
@@ -47,13 +60,8 @@ def test_is_auto_model_name_matches_case_and_whitespace_insensitively():
     assert not is_auto_model_name(None)
 
 
-def test_routes_using_the_latest_user_message_as_the_prompt():
+def test_routes_using_the_real_user_message_run_one_receives():
     coder = FakeCoder()
-    coder.cur_messages = [
-        {"role": "user", "content": "earlier turn, ignored"},
-        {"role": "assistant", "content": "earlier reply, ignored"},
-        {"role": "user", "content": "the actual prompt to route on"},
-    ]
     seen = {}
 
     def fake_route_fn(prompt, ladder):
@@ -61,48 +69,80 @@ def test_routes_using_the_latest_user_message_as_the_prompt():
         seen["ladder"] = ladder
         return "ollama/qwen2.5:7b"
 
-    enable_auto_routing(
-        coder, route_fn=fake_route_fn, model_factory=lambda name: f"model:{name}"
-    )
-    coder.send(["formatted", "messages"])
+    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: f"model:{name}")
+    coder.run_one("the actual prompt to route on", preproc=True)
 
     assert seen["prompt"] == "the actual prompt to route on"
     assert seen["ladder"] == DEFAULT_AUTO_LADDER
 
 
-def test_routed_model_is_passed_through_to_the_original_send():
+def test_main_model_is_set_before_the_original_run_one_is_called():
+    """This is what actually fixes the spinner: send_message() builds
+    its "Waiting for {model}" text from main_model before send() ever
+    runs, so main_model has to be set before the original run_one --
+    not inside some later call it makes -- for the spinner to show the
+    routed model instead of a stale placeholder."""
     coder = FakeCoder()
-    coder.cur_messages = [{"role": "user", "content": "do the thing"}]
 
     enable_auto_routing(
         coder,
         route_fn=lambda prompt, ladder: "ollama/qwen2.5:7b",
         model_factory=lambda name: f"model-object:{name}",
     )
-    coder.send(["formatted", "messages"])
+    coder.run_one("do the thing", preproc=True)
 
-    assert len(coder.send_calls) == 1
-    assert coder.send_calls[0]["model"] == "model-object:ollama/qwen2.5:7b"
+    assert len(coder.run_one_calls) == 1
+    assert coder.run_one_calls[0]["main_model"] == "model-object:ollama/qwen2.5:7b"
 
 
-def test_an_explicit_model_bypasses_routing_entirely():
+def test_a_slash_command_bypasses_routing_entirely():
     coder = FakeCoder()
-    coder.cur_messages = [{"role": "user", "content": "do the thing"}]
     route_fn_calls = []
 
     enable_auto_routing(
         coder,
         route_fn=lambda prompt, ladder: route_fn_calls.append(1) or "ollama/qwen2.5:7b",
     )
-    coder.send(["formatted", "messages"], model="explicit-override")
+    coder.run_one("/model ollama/qwen2.5:14b", preproc=True)
 
     assert route_fn_calls == []
-    assert coder.send_calls[0]["model"] == "explicit-override"
+    assert coder.main_model == "placeholder-model"  # untouched
+    assert coder.run_one_calls[0]["user_message"] == "/model ollama/qwen2.5:14b"
+
+
+def test_preproc_false_treats_a_leading_slash_as_a_literal_message_not_a_command():
+    """Matches run_one's own real semantics: command detection only
+    happens when preproc=True. A slash in the message shouldn't
+    silently skip routing when preproc=False."""
+    coder = FakeCoder()
+    route_fn_calls = []
+
+    def fake_route_fn(prompt, ladder):
+        route_fn_calls.append(prompt)
+        return "ollama/qwen2.5:7b"
+
+    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: name)
+    coder.run_one("/not/actually/a/command", preproc=False)
+
+    assert route_fn_calls == ["/not/actually/a/command"]
+
+
+def test_an_empty_message_bypasses_routing_without_raising():
+    coder = FakeCoder()
+    route_fn_calls = []
+
+    enable_auto_routing(
+        coder,
+        route_fn=lambda prompt, ladder: route_fn_calls.append(1) or "ollama/qwen2.5:7b",
+    )
+    coder.run_one("", preproc=True)
+
+    assert route_fn_calls == []
+    assert coder.main_model == "placeholder-model"
 
 
 def test_model_construction_is_cached_across_repeated_routing_decisions():
     coder = FakeCoder()
-    coder.cur_messages = [{"role": "user", "content": "do the thing"}]
     build_calls = []
 
     def model_factory(name):
@@ -114,30 +154,47 @@ def test_model_construction_is_cached_across_repeated_routing_decisions():
         route_fn=lambda prompt, ladder: "ollama/qwen2.5:7b",
         model_factory=model_factory,
     )
-    coder.send(["messages one"])
-    coder.send(["messages two"])
+    coder.run_one("message one", preproc=True)
+    coder.run_one("message two", preproc=True)
 
     assert build_calls == ["ollama/qwen2.5:7b"]  # built once, reused the second time
 
 
+def test_a_reflection_is_not_re_routed_because_run_one_is_only_called_once_per_real_turn():
+    """Reflections are Aider's own same-model retry-with-error-feedback
+    loop, driven entirely inside the original run_one's while loop --
+    this wrapper never sees them, so a reflection can't get routed to
+    a different model than the turn that triggered it."""
+    coder = FakeCoder()
+    route_fn_calls = []
+
+    def fake_route_fn(prompt, ladder):
+        route_fn_calls.append(prompt)
+        return "ollama/qwen2.5:7b"
+
+    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: name)
+    coder.run_one("write me a function", preproc=True)
+
+    assert route_fn_calls == ["write me a function"]
+    assert len(coder.run_one_calls) == 1
+
+
 def test_announces_the_routing_decision_via_tool_output():
     coder = FakeCoder()
-    coder.cur_messages = [{"role": "user", "content": "do the thing"}]
 
     enable_auto_routing(
         coder,
         route_fn=lambda prompt, ladder: "ollama/llama3.2:1b",
         model_factory=lambda name: name,
     )
-    coder.send(["messages"])
+    coder.run_one("do the thing", preproc=True)
 
     assert any("ollama/llama3.2:1b" in msg for msg in coder.io.output)
 
 
 def test_custom_ladder_is_passed_to_the_router_and_stored_on_the_coder():
-    coder = FakeCoder()
-    coder.cur_messages = [{"role": "user", "content": "do the thing"}]
     custom_ladder = ["ollama/a", "ollama/b"]
+    coder = FakeCoder()
     seen_ladder = {}
 
     def fake_route_fn(prompt, ladder):
@@ -147,25 +204,10 @@ def test_custom_ladder_is_passed_to_the_router_and_stored_on_the_coder():
     enable_auto_routing(
         coder, ladder=custom_ladder, route_fn=fake_route_fn, model_factory=lambda name: name
     )
-    coder.send(["messages"])
+    coder.run_one("do the thing", preproc=True)
 
     assert seen_ladder["ladder"] == custom_ladder
     assert coder.cost_autopilot_auto_ladder == custom_ladder
-
-
-def test_empty_cur_messages_routes_on_an_empty_prompt_without_raising():
-    coder = FakeCoder()
-    coder.cur_messages = []
-    seen = {}
-
-    def fake_route_fn(prompt, ladder):
-        seen["prompt"] = prompt
-        return "ollama/a"
-
-    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: name)
-    coder.send(["messages"])
-
-    assert seen["prompt"] == ""
 
 
 # --- parse_ladder: shared by --auto-ladder and /model auto <ladder> -----
