@@ -25,6 +25,11 @@ from aider.coders import Coder
 from aider.coders.base_coder import UnknownEditFormat
 from aider.commands import Commands, SwitchCoder
 from aider.copypaste import ClipboardWatcher
+from aider.cost_autopilot.auto_mode import (
+    DEFAULT_AUTO_LADDER,
+    enable_auto_routing,
+    is_auto_model_name,
+)
 from aider.deprecated import handle_deprecated_model_args
 from aider.format_settings import format_settings, scrub_sensitive_info
 from aider.history import ChatSummary
@@ -819,8 +824,17 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             )
             return 1
 
+    # --model auto isn't a real, litellm-resolvable model name -- it means
+    # "route each message with cost_autopilot instead of fixing one model
+    # for the whole session." Aider itself only ever learns about the
+    # ladder's cheapest model here, for sane edit_format/streaming/cost
+    # defaults; enable_auto_routing() below installs the actual per-message
+    # override once the Coder exists.
+    auto_routing_requested = is_auto_model_name(args.model)
+    model_name_for_construction = DEFAULT_AUTO_LADDER[0] if auto_routing_requested else args.model
+
     main_model = models.Model(
-        args.model,
+        model_name_for_construction,
         weak_model=args.weak_model,
         editor_model=args.editor_model,
         editor_edit_format=args.editor_edit_format,
@@ -1014,6 +1028,9 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         io.tool_error(str(err))
         analytics.event("exit", reason="ValueError during coder creation")
         return 1
+
+    if auto_routing_requested:
+        enable_auto_routing(coder)
 
     if return_coder:
         analytics.event("exit", reason="Returning coder object")

@@ -20,8 +20,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from aider.coders import Coder
-
 from aider.cost_autopilot.escalation import (
     DEFAULT_MAX_ATTEMPTS,
     EscalationOutcome,
@@ -66,6 +64,12 @@ def _disable_reflections(coder) -> None:
 
 
 def _make_coder(model: str, io, fnames: list[str], protected_paths: set[str]):
+    # Lazy import: aider.coders pulls in aider.commands, which imports
+    # cost_autopilot.auto_mode, which imports _model_for from this module
+    # -- a top-level "from aider.coders import Coder" here would cycle
+    # back on itself before this module finishes loading.
+    from aider.coders import Coder
+
     coder = Coder.create(
         main_model=_model_for(model),
         io=io,

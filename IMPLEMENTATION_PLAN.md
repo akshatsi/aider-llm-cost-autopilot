@@ -214,6 +214,24 @@ The open question from the Model ladder section above is now answered with data,
 
 **The broader lesson, worth stating plainly:** a fix checked only in isolation, against a call built to look like the failure case, is not the same as a fix confirmed against the real failure end to end. The first fix passed its own test and still left the real bug standing, because the real bug lived one layer up, in Aider's own retry logic, not in the LiteLLM call the test exercised. Re-running the whole batch rather than trusting the isolated check is what caught it.
 
+### Step 7 — AUTO: routing inside a normal, ongoing Aider session — ✅ DONE
+
+Everything through Step 6 only runs as a one-shot batch call (`run_autopilot_task()`) from a script — no way to just use it while chatting with Aider normally. `aider/cost_autopilot/auto_mode.py` closes that gap: `--model auto` at startup, or `/model auto` mid-session, makes every message route to whichever ladder model the router picks for it, instead of one model being fixed for the whole session.
+
+Deliberately narrower than the batch orchestrator: no test-based validation, no escalation, no revert. The user reviews and tests changes the same way they would in any other Aider session — AUTO only answers "which model handles this message." Whether to also validate and escalate inside a live, multi-turn conversation was raised directly and set aside on purpose: a revert mid-conversation, with earlier turns already sitting in chat history, is a different and bigger design question than a revert between isolated batch attempts. Worth returning to, not worth guessing at here.
+
+**Where this actually hooks in, and why there.** Aider's own `/model X` rebuilds the Coder with a new fixed `main_model` for the rest of the session — no good, since AUTO needs to decide fresh *per message*, not once per session. The real hook is `Coder.send(messages, model=None, ...)`, which already falls back to `self.main_model` only when `model` is `None` — a seam Step 4 had already found and documented. `enable_auto_routing()` wraps `coder.send` at the instance level (same pattern as the protected-path guard): when called with `model=None`, it reads the literal, just-typed user message straight off `coder.cur_messages[-1]`, routes it through `pick_starting_model()`, and passes the resolved model through to the real `send()`. Nothing about message formatting, cost display, or the reflection loop is touched — `send_message()`'s own logic runs completely untouched, only the one fallback decision it depends on is intercepted.
+
+`--model auto` at startup can't construct a real `Model("auto", ...)` — litellm has never heard of it. Resolved by treating `auto` as a sentinel in `main.py`: the Coder is actually constructed against the ladder's cheapest model (sane `edit_format`/streaming/cost defaults), and `enable_auto_routing()` is installed right after construction succeeds. `/model auto` mid-session is simpler — no `SwitchCoder`, no Coder rebuild, just the wrap applied directly to the coder already in use, so existing file context and chat history carry over exactly as they were.
+
+Fixing this in place surfaced one real circular import: `orchestrator.py`'s top-level `from aider.coders import Coder` cycled back through `aider.coders → aider.commands → cost_autopilot.auto_mode → cost_autopilot.orchestrator`, since `commands.py` now needs `auto_mode.py` for `/model auto`. Fixed by moving that one import into `_make_coder()`, the only place it's actually used — no behavior change, since Python caches the import either way.
+
+**Live-verified, not just unit-tested:**
+- `aider --model auto --message "..."` on a fresh repo: router picked `qwen2.5:7b`, wrote the correct one-line fix, Aider committed normally.
+- `/model auto` mid-session, then two separate follow-up messages in the same long-lived `Coder`: each message re-routed independently (both landed on `qwen2.5:7b` here), each edit built correctly on top of the previous one still being in the file, two clean separate commits. Confirms conversation and file state carry over across turns exactly as designed — this is what "one ongoing session," not one-shot-per-message, was for.
+
+8 new unit tests in `test_auto_mode.py`, fakes throughout — routes on the literal latest message and not earlier history, an explicit `model=` bypasses routing entirely, constructed models are cached across repeated routing decisions, the routing choice is announced via `tool_output`, a custom ladder is honored, and an empty conversation routes on an empty prompt without raising. 42 tests total across the package now.
+
 ## Cost
 
 Zero. Ollama for generation, the `bert` router runs locally on CPU via PyTorch, and no step requires a funded API key. The placeholder `OPENAI_API_KEY` is never used for a request.
