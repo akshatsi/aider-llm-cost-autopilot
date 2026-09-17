@@ -244,6 +244,16 @@ Live-verified in a real terminal, not piped output — piping suppresses Aider's
 
 9 tests rewritten against the new hook, one new (a reflection can't be re-routed because `run_one` is only ever called once per real turn). 49 tests total across the package now.
 
+**Follow-up: a user without Ollama running would sit through ~60-90s of retries per message, not fail fast.** Asked directly — "what if the user doesn't have Ollama" — and checked rather than assumed: startup and routing both work fine with no Ollama running at all (constructing the placeholder `Model` needs no network call, and the router is local PyTorch, not a call to Ollama). The actual completion call is what fails, and simulating that (pointing `OLLAMA_API_BASE` at a port nothing listens on) showed why it wasn't fast: `litellm.APIConnectionError: OllamaException - [Errno 61] Connection refused`, then `Retrying in 0.2 seconds...`, doubling up to `RETRY_TIMEOUT = 60`, then giving up silently after roughly a minute.
+
+This is a *different* retry loop than the one the Step 6 timeout fix addressed. That fix set `num_retries=0` on the LiteLLM call itself, stopping LiteLLM's own internal retries on a slow generation. This one lives one layer up, entirely inside Aider's `send_message()` (`base_coder.py`), which catches `APIConnectionError` and retries with its own doubling backoff regardless of what LiteLLM's `num_retries` says — a second, separate mechanism the earlier fix never touched, because it was solving a different problem (a stuck generation, not a refused connection).
+
+Fixed by patching `LiteLLMExceptions.get_ex_info` (`aider/exceptions.py`) — the exact function that decides whether an error is worth retrying — to recognize this one specific case: an `APIConnectionError` whose message names both Ollama and a refused connection. `get_ex_info` already has this shape of special-casing built in for other providers (a boto3 import error, a specific OpenRouter failure), so this follows the existing pattern rather than inventing a new one. Installed once per process, idempotently, whenever `_model_for()` prepares an Ollama model — every *other* `APIConnectionError` (a flaky paid API, a real transient blip against a real Ollama call) keeps Aider's normal retry behavior untouched.
+
+Live-verified against the identical simulated failure: total time dropped from roughly two minutes to 14.5 seconds (nearly all of it router/startup overhead, not retries), with one clear line instead of eight rounds of silent backoff: `Could not connect to Ollama -- is it running? Check OLLAMA_API_BASE.`
+
+5 new tests — the specific case is fast-failed, a different Ollama error still retries normally, a non-Ollama connection error is unaffected, the patch installs at most once, and `_model_for()` actually installs it. 54 tests total across the package now.
+
 ## Cost
 
 Zero. Ollama for generation, the `bert` router runs locally on CPU via PyTorch, and no step requires a funded API key. The placeholder `OPENAI_API_KEY` is never used for a request.

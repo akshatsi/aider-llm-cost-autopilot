@@ -15,6 +15,7 @@ from aider.cost_autopilot.orchestrator import (
     LOCAL_MODEL_TIMEOUT_S,
     _apply_protected_path_guard,
     _disable_reflections,
+    _ensure_ollama_connection_errors_fail_fast,
     _model_for,
     _revert,
 )
@@ -176,3 +177,79 @@ def test_disable_reflections_zeroes_out_aiders_own_retry_loop():
     _disable_reflections(coder)
 
     assert coder.max_reflections == 0
+
+
+# --- _ensure_ollama_connection_errors_fail_fast: no ~60-90s retry storm --
+
+
+def _make_api_connection_error(message: str):
+    import litellm
+
+    return litellm.APIConnectionError(message, llm_provider="ollama", model="ollama/llama3.2:1b")
+
+
+def test_ollama_connection_refused_is_classified_as_non_retryable():
+    """Real finding: pointing OLLAMA_API_BASE at nothing listening
+    produced ~60-90s of Aider's own doubling-backoff retries
+    (base_coder.py's send_message loop, separate from the
+    timeout/num_retries bounds on the LiteLLM call itself) before
+    giving up on an error that was never going to resolve itself."""
+    _ensure_ollama_connection_errors_fail_fast()
+    from aider.exceptions import LiteLLMExceptions
+
+    err = _make_api_connection_error("OllamaException - [Errno 61] Connection refused")
+    info = LiteLLMExceptions().get_ex_info(err)
+
+    assert info.retry is False
+    assert "ollama" in info.description.lower()
+
+
+def test_a_different_ollama_error_still_retries_normally():
+    """Only the specific "nothing is listening" case is fast-failed --
+    a real, transient error against a real running Ollama (out of
+    memory, model still loading) should keep Aider's normal retry
+    behavior, not be silently swallowed by too broad a match."""
+    _ensure_ollama_connection_errors_fail_fast()
+    from aider.exceptions import LiteLLMExceptions
+
+    err = _make_api_connection_error("OllamaException - model is still loading")
+    info = LiteLLMExceptions().get_ex_info(err)
+
+    assert info.retry is True
+
+
+def test_a_non_ollama_connection_error_is_unaffected():
+    """A flaky paid API (or a real network blip against a real Ollama
+    call) must keep retrying -- this patch is only ever supposed to
+    change behavior for "the local server was never there."
+    """
+    _ensure_ollama_connection_errors_fail_fast()
+    from aider.exceptions import LiteLLMExceptions
+
+    err = _make_api_connection_error("Connection refused")  # no "ollama" in the message
+    info = LiteLLMExceptions().get_ex_info(err)
+
+    assert info.retry is True
+
+
+def test_patch_is_applied_at_most_once():
+    """Guards against a second _model_for() call for another Ollama
+    model (the normal case across a multi-attempt escalation) wrapping
+    get_ex_info a second time and stacking indefinitely."""
+    from aider.exceptions import LiteLLMExceptions
+
+    _ensure_ollama_connection_errors_fail_fast()
+    patched_once = LiteLLMExceptions.get_ex_info
+    _ensure_ollama_connection_errors_fail_fast()
+    patched_twice = LiteLLMExceptions.get_ex_info
+
+    assert patched_once is patched_twice
+
+
+def test_model_for_installs_the_patch_for_an_ollama_model():
+    from aider.exceptions import LiteLLMExceptions
+
+    _model_for("ollama/llama3.2:1b")
+    err = _make_api_connection_error("OllamaException - [Errno 61] Connection refused")
+
+    assert LiteLLMExceptions().get_ex_info(err).retry is False

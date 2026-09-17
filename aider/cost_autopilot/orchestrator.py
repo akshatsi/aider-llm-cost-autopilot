@@ -96,6 +96,58 @@ def _make_coder(model: str, io, fnames: list[str], protected_paths: set[str]):
 LOCAL_MODEL_TIMEOUT_S = 120
 LOCAL_MODEL_MAX_TOKENS = 4096
 
+_ollama_fast_fail_patched = False
+
+
+def _ensure_ollama_connection_errors_fail_fast() -> None:
+    """The timeout/num_retries bounds above stop LiteLLM's own internal
+    retries on a slow or degenerate generation -- they do nothing for a
+    connection failure, because that's a completely separate retry
+    loop, inside Aider's own send_message() (base_coder.py), driven by
+    LiteLLMExceptions.get_ex_info() classifying APIConnectionError as
+    always retryable. Found live: pointing OLLAMA_API_BASE at nothing
+    listening produced ~60-90s of "Retrying in N seconds..." (0.2s
+    doubling up to RETRY_TIMEOUT=60s) before Aider gave up -- for an
+    error that was never going to resolve itself.
+
+    Patches LiteLLMExceptions.get_ex_info at the class level (idempotent
+    -- called every time an Ollama model is prepared, but only ever
+    installs once per process) to recognize that one specific case --
+    an APIConnectionError whose message names both Ollama and a refused
+    connection -- and classify it as non-retryable, so it fails on the
+    first attempt with a clear message instead.
+
+    Deliberately narrow: matches on the error text, not the exception
+    type, so every other APIConnectionError (a flaky paid API, a
+    transient network blip on a real Ollama call) keeps Aider's normal
+    retry-with-backoff behavior -- that's usually the right call; it's
+    specifically wrong only for "the local server was never there."
+    """
+    global _ollama_fast_fail_patched
+    if _ollama_fast_fail_patched:
+        return
+
+    from aider.exceptions import ExInfo, LiteLLMExceptions
+
+    original_get_ex_info = LiteLLMExceptions.get_ex_info
+
+    def patched_get_ex_info(self, ex):
+        text = str(ex).lower()
+        if (
+            ex.__class__.__name__ == "APIConnectionError"
+            and "ollama" in text
+            and "connection refused" in text
+        ):
+            return ExInfo(
+                "APIConnectionError",
+                False,
+                "Could not connect to Ollama -- is it running? Check OLLAMA_API_BASE.",
+            )
+        return original_get_ex_info(self, ex)
+
+    LiteLLMExceptions.get_ex_info = patched_get_ex_info
+    _ollama_fast_fail_patched = True
+
 
 def _model_for(model_name: str):
     from aider.models import Model
@@ -107,6 +159,7 @@ def _model_for(model_name: str):
         extra.setdefault("num_retries", 0)
         extra.setdefault("max_tokens", LOCAL_MODEL_MAX_TOKENS)
         model.extra_params = extra
+        _ensure_ollama_connection_errors_fail_fast()
     return model
 
 
