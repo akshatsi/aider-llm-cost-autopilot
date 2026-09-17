@@ -14,7 +14,7 @@ from prompt_toolkit.completion import Completion, PathCompleter
 from prompt_toolkit.document import Document
 
 from aider import models, prompts, voice
-from aider.cost_autopilot.auto_mode import enable_auto_routing, is_auto_model_name
+from aider.cost_autopilot.auto_mode import enable_auto_routing, is_auto_model_name, parse_ladder
 from aider.editor import pipe_editor
 from aider.format_settings import format_settings
 from aider.help import Help, install_help_extra
@@ -86,7 +86,7 @@ class Commands:
         self.original_read_only_fnames = set(original_read_only_fnames or [])
 
     def cmd_model(self, args):
-        "Switch the Main Model to a new LLM. 'auto' routes each message via cost_autopilot instead of fixing one model for the session"
+        "Switch the Main Model to a new LLM. 'auto [MODEL1,MODEL2,...]' routes each message via cost_autopilot instead of fixing one model for the session"
 
         model_name = args.strip()
         if not model_name:
@@ -94,13 +94,21 @@ class Commands:
             self.io.tool_output(announcements)
             return
 
-        if is_auto_model_name(model_name):
+        first_word, _, rest = model_name.partition(" ")
+        if is_auto_model_name(first_word):
             # No SwitchCoder here -- unlike a real model, "auto" doesn't
             # replace main_model or the Coder; it wraps the *existing*
             # coder's send() so each message picks its own model, with
             # conversation history and file context carrying over exactly
             # as they were.
-            enable_auto_routing(self.coder)
+            ladder = None
+            if rest.strip():
+                try:
+                    ladder = parse_ladder(rest)
+                except ValueError as err:
+                    self.io.tool_error(str(err))
+                    return
+            enable_auto_routing(self.coder, ladder=ladder)
             self.io.tool_output(
                 f"Now routing each message via cost_autopilot: {self.coder.cost_autopilot_auto_ladder}"
             )

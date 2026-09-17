@@ -230,7 +230,13 @@ Fixing this in place surfaced one real circular import: `orchestrator.py`'s top-
 - `aider --model auto --message "..."` on a fresh repo: router picked `qwen2.5:7b`, wrote the correct one-line fix, Aider committed normally.
 - `/model auto` mid-session, then two separate follow-up messages in the same long-lived `Coder`: each message re-routed independently (both landed on `qwen2.5:7b` here), each edit built correctly on top of the previous one still being in the file, two clean separate commits. Confirms conversation and file state carry over across turns exactly as designed — this is what "one ongoing session," not one-shot-per-message, was for.
 
-8 new unit tests in `test_auto_mode.py`, fakes throughout — routes on the literal latest message and not earlier history, an explicit `model=` bypasses routing entirely, constructed models are cached across repeated routing decisions, the routing choice is announced via `tool_output`, a custom ladder is honored, and an empty conversation routes on an empty prompt without raising. 42 tests total across the package now.
+8 new unit tests in `test_auto_mode.py`, fakes throughout — routes on the literal latest message and not earlier history, an explicit `model=` bypasses routing entirely, constructed models are cached across repeated routing decisions, the routing choice is announced via `tool_output`, a custom ladder is honored, and an empty conversation routes on an empty prompt without raising.
+
+**Follow-up: `--auto-ladder`, so AUTO isn't stuck with the hardcoded Ollama default.** The ladder itself was always provider-agnostic — `pick_starting_model()` only ever needs two model name strings, it doesn't care whether they're local or paid — but there was no way to actually *set* a different one short of calling `enable_auto_routing()` from Python directly. Added `--auto-ladder MODEL1,MODEL2,...` (comma-separated, cheapest first) for startup, and the same syntax works inline mid-session as `/model auto MODEL1,MODEL2,...`. Both parse through one shared `parse_ladder()`, so the format is defined once. `--auto-ladder` without `--model auto` is caught and warned about rather than silently doing nothing.
+
+Live-verified: a single-model `--auto-ladder` forces that exact model with no router call needed (matches `pick_starting_model()`'s existing single-model shortcut), and `/model auto ollama/qwen2.5:14b` mid-session correctly swapped the active ladder and the very next message routed within it.
+
+47 tests total across the package now.
 
 ## Cost
 

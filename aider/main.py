@@ -29,6 +29,7 @@ from aider.cost_autopilot.auto_mode import (
     DEFAULT_AUTO_LADDER,
     enable_auto_routing,
     is_auto_model_name,
+    parse_ladder,
 )
 from aider.deprecated import handle_deprecated_model_args
 from aider.format_settings import format_settings, scrub_sensitive_info
@@ -831,7 +832,20 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     # defaults; enable_auto_routing() below installs the actual per-message
     # override once the Coder exists.
     auto_routing_requested = is_auto_model_name(args.model)
-    model_name_for_construction = DEFAULT_AUTO_LADDER[0] if auto_routing_requested else args.model
+    auto_ladder = None
+    if args.auto_ladder:
+        try:
+            auto_ladder = parse_ladder(args.auto_ladder)
+        except ValueError as err:
+            io.tool_error(str(err))
+            analytics.event("exit", reason="Invalid --auto-ladder")
+            return 1
+        if not auto_routing_requested:
+            io.tool_warning("--auto-ladder has no effect without --model auto")
+
+    model_name_for_construction = (
+        (auto_ladder or DEFAULT_AUTO_LADDER)[0] if auto_routing_requested else args.model
+    )
 
     main_model = models.Model(
         model_name_for_construction,
@@ -1030,7 +1044,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         return 1
 
     if auto_routing_requested:
-        enable_auto_routing(coder)
+        enable_auto_routing(coder, ladder=auto_ladder)
 
     if return_coder:
         analytics.event("exit", reason="Returning coder object")

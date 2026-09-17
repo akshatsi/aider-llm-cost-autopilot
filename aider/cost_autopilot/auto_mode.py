@@ -28,6 +28,16 @@ def is_auto_model_name(model_name: str) -> bool:
     return (model_name or "").strip().lower() == AUTO_SENTINEL
 
 
+def parse_ladder(raw: str) -> list[str]:
+    """Parses --auto-ladder's and /model auto's comma-separated ladder
+    string into an ordered list, cheapest first. Shared by both entry
+    points so the format only needs to be defined once."""
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    if not models:
+        raise ValueError(f"--auto-ladder got no usable model names: {raw!r}")
+    return models
+
+
 def enable_auto_routing(
     coder,
     ladder: list[str] | None = None,

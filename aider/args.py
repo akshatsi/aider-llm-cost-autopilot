@@ -62,6 +62,15 @@ def get_parser(default_config_files, git_root):
         default=None,
         help="Specify the model to use for the main chat",
     )
+    group.add_argument(
+        "--auto-ladder",
+        metavar="MODEL1,MODEL2,...",
+        default=None,
+        help=(
+            "Comma-separated models to route between with --model auto / /model auto, "
+            "cheapest first (default: ollama/llama3.2:1b,ollama/qwen2.5:7b,ollama/qwen2.5:14b)"
+        ),
+    )
 
     ##########
     group = parser.add_argument_group("API Keys and settings")

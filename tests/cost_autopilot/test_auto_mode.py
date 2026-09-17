@@ -4,10 +4,13 @@ unit test). route_fn and model_factory are the injection points, same
 pattern as pick_starting_model's own route_fn.
 """
 
+import pytest
+
 from aider.cost_autopilot.auto_mode import (
     DEFAULT_AUTO_LADDER,
     enable_auto_routing,
     is_auto_model_name,
+    parse_ladder,
 )
 
 
@@ -163,3 +166,27 @@ def test_empty_cur_messages_routes_on_an_empty_prompt_without_raising():
     coder.send(["messages"])
 
     assert seen["prompt"] == ""
+
+
+# --- parse_ladder: shared by --auto-ladder and /model auto <ladder> -----
+
+
+def test_parse_ladder_splits_on_commas_in_order():
+    assert parse_ladder("ollama/a,ollama/b,ollama/c") == ["ollama/a", "ollama/b", "ollama/c"]
+
+
+def test_parse_ladder_strips_whitespace_around_each_model():
+    assert parse_ladder(" ollama/a , ollama/b ") == ["ollama/a", "ollama/b"]
+
+
+def test_parse_ladder_drops_empty_entries_from_stray_commas():
+    assert parse_ladder("ollama/a,,ollama/b,") == ["ollama/a", "ollama/b"]
+
+
+def test_parse_ladder_accepts_a_single_model():
+    assert parse_ladder("ollama/a") == ["ollama/a"]
+
+
+def test_parse_ladder_rejects_a_string_with_no_usable_model_names():
+    with pytest.raises(ValueError):
+        parse_ladder(",, ,")
