@@ -7,7 +7,6 @@ pattern as pick_starting_model's own route_fn.
 import pytest
 
 from aider.cost_autopilot.auto_mode import (
-    DEFAULT_AUTO_LADDER,
     enable_auto_routing,
     is_auto_model_name,
     parse_ladder,
@@ -62,6 +61,7 @@ def test_is_auto_model_name_matches_case_and_whitespace_insensitively():
 
 def test_routes_using_the_real_user_message_run_one_receives():
     coder = FakeCoder()
+    an_explicit_ladder = ["ollama/a", "ollama/b"]
     seen = {}
 
     def fake_route_fn(prompt, ladder):
@@ -69,11 +69,48 @@ def test_routes_using_the_real_user_message_run_one_receives():
         seen["ladder"] = ladder
         return "ollama/qwen2.5:7b"
 
-    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: f"model:{name}")
+    enable_auto_routing(
+        coder,
+        ladder=an_explicit_ladder,
+        route_fn=fake_route_fn,
+        model_factory=lambda name: f"model:{name}",
+    )
     coder.run_one("the actual prompt to route on", preproc=True)
 
     assert seen["prompt"] == "the actual prompt to route on"
-    assert seen["ladder"] == DEFAULT_AUTO_LADDER
+    assert seen["ladder"] == an_explicit_ladder
+
+
+def test_no_ladder_triggers_discovery_not_a_hardcoded_default():
+    """There is no DEFAULT_AUTO_LADDER any more -- ladder=None must go
+    through discovery, not silently fall back to some fixed list."""
+    coder = FakeCoder()
+    discover_calls = []
+
+    def fake_discover():
+        discover_calls.append(1)
+        return ["ollama/discovered-model"]
+
+    enable_auto_routing(
+        coder,
+        discover_ladder_fn=fake_discover,
+        route_fn=lambda prompt, ladder: ladder[0],
+        model_factory=lambda name: name,
+    )
+    coder.run_one("do the thing", preproc=True)
+
+    assert discover_calls == [1]
+    assert coder.cost_autopilot_auto_ladder == ["ollama/discovered-model"]
+
+
+def test_discovery_failure_propagates_instead_of_being_swallowed():
+    coder = FakeCoder()
+
+    def failing_discover():
+        raise ValueError("no models available anywhere")
+
+    with pytest.raises(ValueError, match="no models available"):
+        enable_auto_routing(coder, discover_ladder_fn=failing_discover)
 
 
 def test_main_model_is_set_before_the_original_run_one_is_called():
@@ -86,6 +123,7 @@ def test_main_model_is_set_before_the_original_run_one_is_called():
 
     enable_auto_routing(
         coder,
+        ladder=["ollama/qwen2.5:7b"],
         route_fn=lambda prompt, ladder: "ollama/qwen2.5:7b",
         model_factory=lambda name: f"model-object:{name}",
     )
@@ -101,6 +139,7 @@ def test_a_slash_command_bypasses_routing_entirely():
 
     enable_auto_routing(
         coder,
+        ladder=["ollama/qwen2.5:7b"],
         route_fn=lambda prompt, ladder: route_fn_calls.append(1) or "ollama/qwen2.5:7b",
     )
     coder.run_one("/model ollama/qwen2.5:14b", preproc=True)
@@ -121,7 +160,9 @@ def test_preproc_false_treats_a_leading_slash_as_a_literal_message_not_a_command
         route_fn_calls.append(prompt)
         return "ollama/qwen2.5:7b"
 
-    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: name)
+    enable_auto_routing(
+        coder, ladder=["ollama/qwen2.5:7b"], route_fn=fake_route_fn, model_factory=lambda name: name
+    )
     coder.run_one("/not/actually/a/command", preproc=False)
 
     assert route_fn_calls == ["/not/actually/a/command"]
@@ -133,6 +174,7 @@ def test_an_empty_message_bypasses_routing_without_raising():
 
     enable_auto_routing(
         coder,
+        ladder=["ollama/qwen2.5:7b"],
         route_fn=lambda prompt, ladder: route_fn_calls.append(1) or "ollama/qwen2.5:7b",
     )
     coder.run_one("", preproc=True)
@@ -151,6 +193,7 @@ def test_model_construction_is_cached_across_repeated_routing_decisions():
 
     enable_auto_routing(
         coder,
+        ladder=["ollama/qwen2.5:7b"],
         route_fn=lambda prompt, ladder: "ollama/qwen2.5:7b",
         model_factory=model_factory,
     )
@@ -172,7 +215,9 @@ def test_a_reflection_is_not_re_routed_because_run_one_is_only_called_once_per_r
         route_fn_calls.append(prompt)
         return "ollama/qwen2.5:7b"
 
-    enable_auto_routing(coder, route_fn=fake_route_fn, model_factory=lambda name: name)
+    enable_auto_routing(
+        coder, ladder=["ollama/qwen2.5:7b"], route_fn=fake_route_fn, model_factory=lambda name: name
+    )
     coder.run_one("write me a function", preproc=True)
 
     assert route_fn_calls == ["write me a function"]
@@ -184,6 +229,7 @@ def test_announces_the_routing_decision_via_tool_output():
 
     enable_auto_routing(
         coder,
+        ladder=["ollama/llama3.2:1b"],
         route_fn=lambda prompt, ladder: "ollama/llama3.2:1b",
         model_factory=lambda name: name,
     )

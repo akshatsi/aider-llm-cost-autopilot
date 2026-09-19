@@ -101,14 +101,12 @@ class Commands:
             # coder's send() so each message picks its own model, with
             # conversation history and file context carrying over exactly
             # as they were.
-            ladder = None
-            if rest.strip():
-                try:
-                    ladder = parse_ladder(rest)
-                except ValueError as err:
-                    self.io.tool_error(str(err))
-                    return
-            enable_auto_routing(self.coder, ladder=ladder)
+            try:
+                ladder = parse_ladder(rest) if rest.strip() else None
+                enable_auto_routing(self.coder, ladder=ladder)
+            except ValueError as err:
+                self.io.tool_error(str(err))
+                return
             self.io.tool_output(
                 f"Now routing each message via cost_autopilot: {self.coder.cost_autopilot_auto_ladder}"
             )

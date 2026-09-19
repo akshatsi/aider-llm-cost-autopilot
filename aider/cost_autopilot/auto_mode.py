@@ -16,12 +16,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+from aider.cost_autopilot.discovery import discover_ladder
 from aider.cost_autopilot.orchestrator import _model_for
 from aider.cost_autopilot.router import pick_starting_model
 
 AUTO_SENTINEL = "auto"
-
-DEFAULT_AUTO_LADDER = ["ollama/llama3.2:1b", "ollama/qwen2.5:7b", "ollama/qwen2.5:14b"]
 
 
 def is_auto_model_name(model_name: str) -> bool:
@@ -43,6 +42,7 @@ def enable_auto_routing(
     ladder: list[str] | None = None,
     route_fn: Callable[[str, list[str]], str] | None = None,
     model_factory: Callable[[str], object] | None = None,
+    discover_ladder_fn: Callable[[], list[str]] | None = None,
 ) -> None:
     """Instance-level wrap of coder.run_one -- the one place that
     receives the genuine top-level user_message directly, once per
@@ -73,11 +73,17 @@ def enable_auto_routing(
     the old wrap lived) was never reached for either case anyway, so
     this preserves that.
 
-    route_fn and model_factory are injectable for the same reason
-    route_fn is injectable on pick_starting_model itself: tests supply
-    fakes instead of running real router inference or constructing a
-    real litellm-backed Model."""
-    resolved_ladder = list(ladder or DEFAULT_AUTO_LADDER)
+    route_fn, model_factory, and discover_ladder_fn are injectable for
+    the same reason route_fn is injectable on pick_starting_model
+    itself: tests supply fakes instead of running real router
+    inference, constructing a real litellm-backed Model, or hitting a
+    real Ollama server / real environment variables.
+
+    ladder=None triggers discovery -- there is no hardcoded default;
+    the ladder is whatever the user can actually use right now,
+    discovered fresh each time this is called."""
+    find_ladder = discover_ladder_fn or discover_ladder
+    resolved_ladder = list(ladder) if ladder else find_ladder()
     picker = route_fn or pick_starting_model
     build_model = model_factory or _model_for
     model_cache = {}

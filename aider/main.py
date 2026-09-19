@@ -26,11 +26,11 @@ from aider.coders.base_coder import UnknownEditFormat
 from aider.commands import Commands, SwitchCoder
 from aider.copypaste import ClipboardWatcher
 from aider.cost_autopilot.auto_mode import (
-    DEFAULT_AUTO_LADDER,
     enable_auto_routing,
     is_auto_model_name,
     parse_ladder,
 )
+from aider.cost_autopilot.discovery import discover_ladder
 from aider.deprecated import handle_deprecated_model_args
 from aider.format_settings import format_settings, scrub_sensitive_info
 from aider.history import ChatSummary
@@ -828,24 +828,27 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     # --model auto isn't a real, litellm-resolvable model name -- it means
     # "route each message with cost_autopilot instead of fixing one model
     # for the whole session." Aider itself only ever learns about the
-    # ladder's cheapest model here, for sane edit_format/streaming/cost
-    # defaults; enable_auto_routing() below installs the actual per-message
-    # override once the Coder exists.
+    # resolved ladder's cheapest model here, for sane edit_format/streaming
+    # /cost defaults; enable_auto_routing() below installs the actual
+    # per-message override once the Coder exists. There is no hardcoded
+    # default ladder -- without --auto-ladder, it's discovered fresh from
+    # whatever's actually usable right now (Ollama models pulled locally,
+    # plus any provider whose API key is set).
     auto_routing_requested = is_auto_model_name(args.model)
     auto_ladder = None
-    if args.auto_ladder:
+    if auto_routing_requested:
         try:
-            auto_ladder = parse_ladder(args.auto_ladder)
+            auto_ladder = (
+                parse_ladder(args.auto_ladder) if args.auto_ladder else discover_ladder()
+            )
         except ValueError as err:
             io.tool_error(str(err))
-            analytics.event("exit", reason="Invalid --auto-ladder")
+            analytics.event("exit", reason="AUTO: could not resolve a ladder")
             return 1
-        if not auto_routing_requested:
-            io.tool_warning("--auto-ladder has no effect without --model auto")
+    elif args.auto_ladder:
+        io.tool_warning("--auto-ladder has no effect without --model auto")
 
-    model_name_for_construction = (
-        (auto_ladder or DEFAULT_AUTO_LADDER)[0] if auto_routing_requested else args.model
-    )
+    model_name_for_construction = auto_ladder[0] if auto_routing_requested else args.model
 
     main_model = models.Model(
         model_name_for_construction,
