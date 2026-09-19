@@ -34,7 +34,10 @@ CLOUD_PROVIDER_CANDIDATES: dict[str, list[str]] = {
     "ANTHROPIC_API_KEY": ["claude-haiku-4-5", "claude-sonnet-5"],
     "OPENAI_API_KEY": ["gpt-4o-mini", "gpt-4o"],
     "GEMINI_API_KEY": ["gemini/gemini-2.5-flash", "gemini/gemini-2.5-pro"],
-    "GROQ_API_KEY": ["groq/llama-3.3-70b-versatile"],
+    "GROQ_API_KEY": ["groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile"],
+    "DEEPSEEK_API_KEY": ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"],
+    "COHERE_API_KEY": ["command-r-08-2024", "command-r-plus-08-2024"],
+    "XAI_API_KEY": ["xai/grok-3-mini-beta", "xai/grok-3-beta"],
 }
 
 

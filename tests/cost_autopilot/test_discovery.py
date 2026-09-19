@@ -138,12 +138,18 @@ class FakeModel:
         self.info = {"input_cost_per_token": self._PRICES.get(name)}
 
 
+def _clear_all_provider_env_vars(monkeypatch):
+    """Clears every known provider key, not just the ones a given test
+    cares about -- keeps these tests correct as more providers are
+    added, instead of silently missing a real key set in whatever
+    environment they happen to run in."""
+    for env_var in CLOUD_PROVIDER_CANDIDATES:
+        monkeypatch.delenv(env_var, raising=False)
+
+
 def test_cloud_discovery_includes_only_providers_with_a_set_api_key(monkeypatch):
     monkeypatch.setattr("aider.models.Model", FakeModel)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    _clear_all_provider_env_vars(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
 
     found = _discover_cloud_models()
@@ -156,8 +162,7 @@ def test_cloud_discovery_orders_by_real_price_not_dict_declaration_order(monkeyp
     but gpt-4o-mini is cheaper than claude-haiku-4-5 -- the cheaper one
     must come first regardless of provider iteration order."""
     monkeypatch.setattr("aider.models.Model", FakeModel)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    _clear_all_provider_env_vars(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
 
@@ -174,9 +179,7 @@ def test_cloud_discovery_drops_a_candidate_that_fails_to_resolve(monkeypatch):
             self.info = {"input_cost_per_token": 1e-6}
 
     monkeypatch.setattr("aider.models.Model", FlakyModel)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    _clear_all_provider_env_vars(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
 
     found = _discover_cloud_models()
@@ -186,8 +189,7 @@ def test_cloud_discovery_drops_a_candidate_that_fails_to_resolve(monkeypatch):
 
 def test_cloud_discovery_returns_empty_list_when_no_keys_are_set(monkeypatch):
     monkeypatch.setattr("aider.models.Model", FakeModel)
-    for env_var in CLOUD_PROVIDER_CANDIDATES:
-        monkeypatch.delenv(env_var, raising=False)
+    _clear_all_provider_env_vars(monkeypatch)
 
     assert _discover_cloud_models() == []
 
@@ -218,3 +220,30 @@ def test_discover_ladder_raises_a_clear_error_when_nothing_is_found(monkeypatch)
 
     with pytest.raises(ValueError, match="couldn't find any usable models"):
         discover_ladder()
+
+
+# --- a provider key not in the curated set is a real, known gap -----------
+
+
+def test_a_provider_not_in_the_curated_set_is_not_discovered(monkeypatch):
+    """A provider not in CLOUD_PROVIDER_CANDIDATES (e.g. Mistral) is
+    invisible to discovery today -- documents the known limitation
+    rather than silently letting it regress further (e.g. a typo'd env
+    var name) without a test noticing."""
+    assert "MISTRAL_API_KEY" not in CLOUD_PROVIDER_CANDIDATES
+    monkeypatch.setattr("aider.models.Model", FakeModel)
+    _clear_all_provider_env_vars(monkeypatch)
+    monkeypatch.setenv("MISTRAL_API_KEY", "sk-fake")
+
+    assert _discover_cloud_models() == []
+
+
+@pytest.mark.parametrize(
+    "env_var", ["DEEPSEEK_API_KEY", "COHERE_API_KEY", "XAI_API_KEY", "GROQ_API_KEY"]
+)
+def test_every_curated_provider_key_is_detected(monkeypatch, env_var):
+    monkeypatch.setattr("aider.models.Model", FakeModel)
+    _clear_all_provider_env_vars(monkeypatch)
+    monkeypatch.setenv(env_var, "sk-fake")
+
+    assert _discover_cloud_models() == CLOUD_PROVIDER_CANDIDATES[env_var]
